@@ -220,6 +220,13 @@ typedef int
 int
 vy_index_send(struct vinyl_index *index, vy_send_row_f sendrow, void *ctx);
 
+/**
+ * Unit tests
+ */
+
+int
+vy_run_itr_unit_test();
+
 #ifdef __cplusplus
 }
 #endif
