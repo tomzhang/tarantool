@@ -91,7 +91,6 @@ enum vinyl_status {
 	VINYL_INITIAL_RECOVERY,
 	VINYL_FINAL_RECOVERY,
 	VINYL_ONLINE,
-	VINYL_SHUTDOWN,
 	VINYL_DROP,
 	VINYL_MALFUNCTION
 };
@@ -579,13 +578,6 @@ vy_buf_at(struct vy_buf *b, int size, int i) {
 	return b->s + size * i;
 }
 
-static inline void
-vy_buf_set(struct vy_buf *b, int size, int i, char *buf, size_t bufsize)
-{
-	assert(b->s + (size * i + bufsize) <= b->p);
-	memcpy(b->s + size * i, buf, bufsize);
-}
-
 #define VINYL_INJECTION_SD_BUILD_0      0
 #define VINYL_INJECTION_SD_BUILD_1      1
 #define VINYL_INJECTION_SI_BRANCH_0     2
@@ -898,12 +890,6 @@ static inline int
 vy_bufiter_has(struct vy_bufiter *bi)
 {
 	return bi->v != NULL;
-}
-
-static inline void *
-vy_bufiter_get(struct vy_bufiter *bi)
-{
-	return bi->v;
 }
 
 static inline void*
@@ -1426,7 +1412,6 @@ vy_status_is_active(enum vinyl_status status)
 	case VINYL_INITIAL_RECOVERY:
 	case VINYL_FINAL_RECOVERY:
 		return true;
-	case VINYL_SHUTDOWN:
 	case VINYL_DROP:
 	case VINYL_OFFLINE:
 	case VINYL_MALFUNCTION:
@@ -1434,11 +1419,6 @@ vy_status_is_active(enum vinyl_status status)
 	}
 	unreachable();
 	return 0;
-}
-
-static inline bool
-vy_status_active(struct vy_status *s) {
-	return vy_status_is_active(vy_status(s));
 }
 
 static inline bool
@@ -4565,7 +4545,6 @@ enum vy_task_type {
 	VY_TASK_COMPACT,
 	VY_TASK_CHECKPOINT,
 	VY_TASK_GC,
-	VY_TASK_SHUTDOWN,
 	VY_TASK_DROP,
 	VY_TASK_NODEGC
 };
@@ -5203,11 +5182,6 @@ vy_task_execute(struct vy_task *task, struct sdc *c, uint64_t vlsn)
 	case VY_TASK_GC:
 	case VY_TASK_COMPACT:
 		rc = si_compact(index, c, task->node, vlsn, NULL, 0);
-		break;
-	case VY_TASK_SHUTDOWN:
-		assert(index->refs == 1); /* referenced by this task */
-		rc = vinyl_index_delete(index);
-		task->index = NULL;
 		break;
 	case VY_TASK_DROP:
 		assert(index->refs == 1); /* referenced by this task */
@@ -6326,7 +6300,7 @@ vy_task_create(struct vy_task *task, struct vinyl_index *index,
 static inline void
 vy_task_destroy(struct vy_task *task)
 {
-	if (task->type != VY_TASK_DROP && task->type != VY_TASK_SHUTDOWN) {
+	if (task->type != VY_TASK_DROP) {
 		vinyl_index_unref(task->index);
 		task->index = NULL;
 	}
@@ -6481,11 +6455,6 @@ vy_planner_peek_shutdown(struct vinyl_index *index, struct vy_task *task)
 		if (index->refs > 0)
 			return 0; /* index still has tasks */
 		vy_task_create(task, index, VY_TASK_DROP);
-		return 1; /* new task */
-	case VINYL_SHUTDOWN:
-		if (index->refs > 0)
-				return 0; /* index still has tasks */
-		vy_task_create(task, index, VY_TASK_SHUTDOWN);
 		return 1; /* new task */
 	default:
 		unreachable();
@@ -8247,24 +8216,6 @@ vinyl_index_unref(struct vinyl_index *index)
 }
 
 int
-vinyl_index_close(struct vinyl_index *index)
-{
-	struct vinyl_env *e = index->env;
-	int status = vy_status(&index->status);
-	if (unlikely(! vy_status_is_active(status)))
-		return -1;
-	/* set last visible transaction id */
-	index->tsn_max = tx_manager_max(e->xm);
-	vy_status_set(&index->status, VINYL_SHUTDOWN);
-	if (e->status == VINYL_SHUTDOWN || e->status == VINYL_OFFLINE) {
-		return vinyl_index_delete(index);
-	}
-	/* schedule index shutdown or drop */
-	vy_scheduler_del_index(e->scheduler, index);
-	return 0;
-}
-
-int
 vinyl_index_drop(struct vinyl_index *index)
 {
 	struct vinyl_env *e = index->env;
@@ -8278,7 +8229,7 @@ vinyl_index_drop(struct vinyl_index *index)
 	index->tsn_max = tx_manager_max(e->xm);
 	vy_status_set(&index->status, VINYL_DROP);
 	rlist_del(&index->link);
-	if (e->status == VINYL_SHUTDOWN || e->status == VINYL_OFFLINE)
+	if (e->status == VINYL_OFFLINE)
 		return vinyl_index_delete(index);
 	/* schedule index shutdown or drop */
 	vy_scheduler_del_index(e->scheduler, index);
@@ -8407,12 +8358,19 @@ vinyl_index_new(struct vinyl_env *e, struct key_def *key_def,
 	char name[128];
 	snprintf(name, sizeof(name), "%" PRIu32 ":%" PRIu32,
 	         key_def->space_id, key_def->iid);
-	struct vinyl_index *dup = vinyl_index_by_name(e, name);
+	struct vinyl_index *dup = NULL;
+	struct vinyl_index *index;
+	rlist_foreach_entry(index, &e->indexes, link) {
+		if (strcmp(index->conf.name, name) == 0) {
+			dup = index;
+			break;
+		}
+	}
 	if (unlikely(dup)) {
 		vy_error("index '%s' already exists", name);
 		return NULL;
 	}
-	struct vinyl_index *index = malloc(sizeof(struct vinyl_index));
+	index = malloc(sizeof(struct vinyl_index));
 	if (unlikely(index == NULL)) {
 		vy_oom();
 		return NULL;
@@ -8517,17 +8475,6 @@ vinyl_index_delete(struct vinyl_index *index)
 	TRASH(index);
 	free(index);
 	return rc_ret;
-}
-
-struct vinyl_index *
-vinyl_index_by_name(struct vinyl_env *e, const char *name)
-{
-	struct vinyl_index *index;
-	rlist_foreach_entry(index, &e->indexes, link) {
-		if (strcmp(index->conf.name, name) == 0)
-			return index;
-	}
-	return NULL;
 }
 
 static int vinyl_index_visible(struct vinyl_index *index, uint64_t tsn)
@@ -9359,7 +9306,6 @@ int
 vinyl_env_delete(struct vinyl_env *e)
 {
 	int rcret = 0;
-	e->status = VINYL_SHUTDOWN;
 	vy_workers_stop(e);
 	/* TODO: tarantool doesn't delete indexes during shutdown */
 	//assert(rlist_empty(&e->db));
