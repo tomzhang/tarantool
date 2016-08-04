@@ -37,6 +37,7 @@
 #include "user_def.h"
 #include "user.h"
 #include "session.h"
+#include "schema.h"
 
 void
 access_check_space(struct space *space, uint8_t access)
@@ -64,6 +65,17 @@ access_check_space(struct space *space, uint8_t access)
 	}
 }
 
+bool
+space_validate_tuple_raw_by_id(uint32_t space_id, const char *data)
+{
+	struct space *space = space_by_id(space_id);
+	try {
+		space_validate_tuple_raw(space, data);
+	} catch (ClientError *) {
+		return false;
+	}
+	return true;
+}
 
 void
 space_fill_index_map(struct space *space)

@@ -82,6 +82,7 @@
 #include "tuple.h"
 #include "tuple_update.h"
 #include "txn.h" /* box_txn_alloc() */
+#include "space.h"
 
 #define vy_cmp(a, b) \
 	((a) == (b) ? 0 : (((a) > (b)) ? 1 : -1))
@@ -8921,6 +8922,10 @@ vy_apply_upsert(struct sv *new_tuple, struct sv *old_tuple,
 	struct vinyl_tuple *result_tuple;
 	vy_apply_upsert_ops(&result_mp, &result_mp_end, new_ops, new_ops_end,
 			    suppress_error);
+	if (!space_validate_tuple_raw_by_id(key_def->space_id, result_mp)) {
+		error_log(diag_last_error(diag_get()));
+		return vinyl_tuple_from_data(index, old_mp, old_mp_end);
+	}
 	if (!(sv_flags(old_tuple) & SVUPSERT)) {
 		/*
 		 * UPDATE case: return the updated old tuple.

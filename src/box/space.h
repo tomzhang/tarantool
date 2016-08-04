@@ -30,10 +30,12 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-#include "index.h"
 #include "key_def.h"
-#include "engine.h"
 #include "small/rlist.h"
+
+#if defined(__cplusplus)
+#include "index.h"
+#include "engine.h"
 
 struct space {
 	struct access access[BOX_USER_MAX];
@@ -227,5 +229,10 @@ void
 space_check_update(struct space *space,
 		   struct tuple *old_tuple,
 		   struct tuple *new_tuple);
+
+extern "C"
+#endif /* defined(__cplusplus) */
+bool
+space_validate_tuple_raw_by_id(uint32_t space_id, const char *data);
 
 #endif /* TARANTOOL_BOX_SPACE_H_INCLUDED */
