@@ -5617,13 +5617,6 @@ static int vy_index_droprepository(char *repo, int drop_directory)
 	}
 	closedir(dir);
 
-	snprintf(path, sizeof(path), "%s/drop", repo);
-	rc = unlink(path);
-	if (unlikely(rc == -1)) {
-		vy_error("index file '%s' unlink error: %s",
-		               path, strerror(errno));
-		return -1;
-	}
 	if (drop_directory) {
 		rc = rmdir(repo);
 		if (unlikely(rc == -1)) {
@@ -5651,16 +5644,12 @@ static int vy_index_dropmark(struct vinyl_index *i)
 {
 	/* create drop file */
 	char path[1024];
-	snprintf(path, sizeof(path), "%s/drop", i->conf.path);
-	struct vy_file drop;
-	vy_file_init(&drop);
-	int rc = vy_file_new(&drop, path);
-	if (unlikely(rc == -1)) {
-		vy_error("drop file '%s' create error: %s",
+	snprintf(path, sizeof(path), "%s/.exists", i->conf.path);
+	if (unlikely(remove(path) == -1)) {
+		vy_error("file '%s' remove error: %s",
 		               path, strerror(errno));
 		return -1;
 	}
-	vy_file_close(&drop);
 	return 0;
 }
 
@@ -6967,6 +6956,14 @@ si_deploy(struct vinyl_index *index, struct vinyl_env *env, int create_directory
 		vy_range_free(n, env, 1);
 		return -1;
 	}
+	char mark_path[PATH_MAX];
+	snprintf(mark_path, PATH_MAX, "%s/.exists", index->conf.path);
+	int mark_fd = open(mark_path, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+	if (mark_fd < 0) {
+		vy_range_free(n, env, 1);
+		return -1;
+	}
+	close(mark_fd);
 	si_insert(index, n);
 	vy_planner_update(&index->p, n);
 	index->size = vy_range_size(n);
@@ -7268,9 +7265,9 @@ static inline int
 si_recoverdrop(struct vinyl_index *i)
 {
 	char path[1024];
-	snprintf(path, sizeof(path), "%s/drop", i->conf.path);
+	snprintf(path, sizeof(path), "%s/.exists", i->conf.path);
 	int rc = path_exists(path);
-	if (likely(! rc))
+	if (likely(rc))
 		return 0;
 	rc = vy_index_droprepository(i->conf.path, 0);
 	if (unlikely(rc == -1))
